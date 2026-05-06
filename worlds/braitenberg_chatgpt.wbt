@@ -1,4 +1,4 @@
-#VRML_SIM R2023b utf8
+#VRML_SIM R2025a utf8
 
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackground.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
@@ -24,6 +24,7 @@ DEF ARENA RectangleArena {
 DEF PIONEER Pioneer3at {
   rotation 0 1 0 0
   controller "braitenberg_chatgpt"
+  supervisor TRUE
   extensionSlot [
     Lidar {
       translation 0 0 0.4
@@ -36,7 +37,6 @@ DEF PIONEER Pioneer3at {
   ]
 }
 DEF BLUEBOX Solid {
-  name "bluebox"
   translation 2.47 0.92 0.25
   children [
     Shape {
@@ -50,12 +50,12 @@ DEF BLUEBOX Solid {
       }
     }
   ]
+  name "bluebox"
   boundingObject Box {
     size 1 3 0.5
   }
 }
 DEF REDBOX Solid {
-  name "redbox"
   translation -2.57 1.84 0.25
   children [
     Shape {
@@ -69,12 +69,12 @@ DEF REDBOX Solid {
       }
     }
   ]
+  name "redbox"
   boundingObject Box {
     size 2 2 0.5
   }
 }
 DEF GREENBOX Solid {
-  name "greenbox"
   translation -1.03 -2.99 0.25
   children [
     Shape {
@@ -88,6 +88,7 @@ DEF GREENBOX Solid {
       }
     }
   ]
+  name "greenbox"
   boundingObject Box {
     size 4 2 0.5
   }
