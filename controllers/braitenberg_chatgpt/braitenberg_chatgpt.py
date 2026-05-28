@@ -2,8 +2,7 @@ from controller import Supervisor
 import os
 import numpy as np
 import LLM_decider
-import matplotlib.pyplot as plt
-from scipy.stats import binned_statistic_2d
+from heatmap_utils import HeatmapCollector
 
 ##Parametros de simulacion
 TIME_STEP = 64
@@ -30,6 +29,7 @@ CORRIDOR_FRONT_OPEN = 0.95
 CORRIDOR_HOLD_STEPS = 180
 CORRIDOR_FORCE_FRONT_MIN = 0.45
 CORRIDOR_HOLD_DIAGONAL_MIN = 0.40
+DEBUG = False
  
 ##Lectura de API_KEY
 with open('api_keys.txt', 'r') as f:
@@ -54,7 +54,6 @@ for wheel in [front_left_wheel, front_right_wheel, back_left_wheel, back_right_w
 ## Lidar
 lidar = robot.getDevice('lidar')
 lidar.enable(TIME_STEP)
-resolution = lidar.getHorizontalResolution()
 max_range = lidar.getMaxRange()
 
 ## Variables de navegacion
@@ -147,8 +146,8 @@ def local_state_decision(left, left_front, front, right_front, right):
 
 
 def validate_state_decision(selected_state, left, left_front, front, right_front, right):
-    front_blocked = front < FRONT_DANGER or left_front < DIAGONAL_DANGER or right_front < DIAGONAL_DANGER
-    side_too_close = left < SIDE_WARN or right < SIDE_WARN
+    front_blocked = compute_front_blocked(left_front, front, right_front)
+    side_too_close = compute_side_too_close(left, right)
 
     # Groq propone el comportamiento, pero estas reglas evitan decisiones fisicamente malas.
     if selected_state == 1 and not is_corridor_candidate(left, left_front, front, right_front, right):
@@ -158,12 +157,73 @@ def validate_state_decision(selected_state, left, left_front, front, right_front
 
     return selected_state
 
+
+def compute_front_blocked(left_front, front, right_front):
+    return front < FRONT_DANGER or left_front < DIAGONAL_DANGER or right_front < DIAGONAL_DANGER
+
+
+def compute_side_too_close(left, right):
+    return left < SIDE_WARN or right < SIDE_WARN
+
+
+def compute_corridor_hold_valid(left, left_front, front, right_front, right):
+    return (
+        front > CORRIDOR_FORCE_FRONT_MIN
+        and min(left, right) >= SIDE_CRITICAL
+        and min(left_front, right_front) >= CORRIDOR_HOLD_DIAGONAL_MIN
+    )
+
+
+def compute_state1_controls(left, left_front, front, right_front, right, max_range):
+    """Compute forward and turn for state 1 (corridor) and return (forward, turn, max_center_turn, corridor_width, center_error).
+
+    This centralizes the corridor control logic so it can be tested independently.
+    """
+    # Normalize and basic measures
+    raw_center_error = (right - left) / max_range
+    off_center = min(1.0, abs(raw_center_error) * 2.0)
+    corridor_width = min(1.0, (left + right) / (2.0 * CORRIDOR_MAX_SIDE))
+    front_priority = np.clip(front / FRONT_CLEAR, 0.0, 1.0)
+
+    # Base forward speed adjusted by corridor width and off-center
+    forward = (0.45 + 0.18 * corridor_width) - 0.14 * off_center
+
+    # Adaptive gain for turning: increases responsiveness in wider corridors and when front is clear
+    base_gain = 0.5
+    gain = base_gain * (0.6 + 0.4 * corridor_width) * (0.5 + 0.5 * front_priority)
+
+    # Max center turn depends on front priority and increases slightly in narrower corridors
+    base_max_center_turn = 0.06 + 0.08 * (1.0 - front_priority)
+    max_center_turn = base_max_center_turn * (1.0 + 0.6 * (1.0 - corridor_width))
+
+    # Use a reduced deadband in state 1 to allow finer corrections
+    center_error = deadband(raw_center_error, TURN_DEADBAND * 0.25)
+    turn = np.clip(center_error * gain, -max_center_turn, max_center_turn)
+
+    # Small additional correction from diagonals when close
+    if front < 0.55:
+        turn += np.clip((right_front - left_front) / max_range, -0.10, 0.10)
+        forward = 0.18
+    elif front < 0.90:
+        turn += np.clip((right_front - left_front) / max_range, -0.08, 0.08)
+        forward = min(forward, 0.32)
+
+    # Safety factor reducing forward speed when lateral clearance is small
+    min_side_norm = np.clip(min(left, right) / CORRIDOR_MAX_SIDE, 0.0, 1.0)
+    safety_factor = 1.0 - (1.0 - min_side_norm) * 0.2
+    forward = forward * safety_factor
+
+    if DEBUG and (step_count % 50 == 0):
+        print("[DEBUG state1] center_error={:.3f} gain={:.3f} turn={:.3f} max_turn={:.3f} forward={:.3f} corridor_w={:.3f}".format(
+            raw_center_error, gain, turn, max_center_turn, forward, corridor_width))
+
+    return forward, turn, max_center_turn, corridor_width, center_error
+
 # =========================
 # Variables para mapa de calor
 # =========================
 
-pos_x = []
-pos_y = []
+collector = HeatmapCollector()
 
 
 ## Asistente virtual LLM
@@ -187,9 +247,8 @@ while robot.step(TIME_STEP) != -1 and step_count < MAX_STEPS:
     right_side = (right * 0.6 + right_front * 0.4) / max_range
     free_space = (left_side - right_side) * 2
     front_cover = (front / max_range)
-    front_blocked_now = front < FRONT_DANGER or left_front < DIAGONAL_DANGER or right_front < DIAGONAL_DANGER
-    side_warning_now = left < SIDE_WARN or right < SIDE_WARN
-    side_danger_now = left < SIDE_DANGER or right < SIDE_DANGER
+    front_blocked_now = compute_front_blocked(left_front, front, right_front)
+    side_warning_now = compute_side_too_close(left, right)
     corridor_now = is_corridor_candidate(left, left_front, front, right_front, right)
 
     if corridor_now and state != 1 and recovery_steps == 0:
@@ -197,11 +256,7 @@ while robot.step(TIME_STEP) != -1 and step_count < MAX_STEPS:
         state_start_step = step_count
         corridor_hold_until = step_count + CORRIDOR_HOLD_STEPS
 
-    corridor_hold_valid = (
-        front > CORRIDOR_FORCE_FRONT_MIN
-        and min(left, right) >= SIDE_CRITICAL
-        and min(left_front, right_front) >= CORRIDOR_HOLD_DIAGONAL_MIN
-    )
+    corridor_hold_valid = compute_corridor_hold_valid(left, left_front, front, right_front, right)
 
     if state == 1 and not corridor_hold_valid:
         state = 0
@@ -263,21 +318,9 @@ while robot.step(TIME_STEP) != -1 and step_count < MAX_STEPS:
     elif state == 1:
         ## Estado 1: Pasillo angosto
         # En pasillo prioriza centrarse: corrige hacia el lado con mas distancia lateral.
-        center_error = (right - left) / max_range
-        off_center = min(1.0, abs(center_error) * 2.0)
-        corridor_width = min(1.0, (left + right) / (2.0 * CORRIDOR_MAX_SIDE))
-        front_priority = np.clip(front / FRONT_CLEAR, 0.0, 1.0)
-        forward = (0.45 + 0.18 * corridor_width) - 0.14 * off_center
-        max_center_turn = 0.06 + 0.08 * (1.0 - front_priority)
-        center_error = deadband(center_error, TURN_DEADBAND * 0.5)
-        turn = np.clip(center_error * 0.42, -max_center_turn, max_center_turn)
-
-        if front < 0.55:
-            turn += np.clip((right_front - left_front) / max_range, -0.10, 0.10)
-            forward = 0.18
-        elif front < 0.90:
-            turn += np.clip((right_front - left_front) / max_range, -0.08, 0.08)
-            forward = min(forward, 0.32)
+        forward, turn, max_center_turn, corridor_width, center_error = compute_state1_controls(
+            left, left_front, front, right_front, right, max_range
+        )
 
         vel_left = forward + turn
         vel_right = forward - turn
@@ -309,12 +352,11 @@ while robot.step(TIME_STEP) != -1 and step_count < MAX_STEPS:
 
     position = node.getPosition()
 
-    pos_x.append(position[0])
-    pos_y.append(position[1])
+    collector.add(position[0], position[1])
 
-    if step_count > STUCK_WINDOW and step_count % 40 == 0 and recovery_steps == 0:
-        dx = pos_x[-1] - pos_x[-STUCK_WINDOW]
-        dy = pos_y[-1] - pos_y[-STUCK_WINDOW]
+    if step_count > STUCK_WINDOW and step_count % 40 == 0 and recovery_steps == 0 and len(collector.x_data) > STUCK_WINDOW:
+        dx = collector.x_data[-1] - collector.x_data[-STUCK_WINDOW]
+        dy = collector.y_data[-1] - collector.y_data[-STUCK_WINDOW]
         displacement = np.sqrt(dx * dx + dy * dy)
 
         if displacement < STUCK_DISTANCE:
@@ -331,13 +373,9 @@ while robot.step(TIME_STEP) != -1 and step_count < MAX_STEPS:
             print("Recuperacion por atasco: desplazamiento={:.3f}".format(displacement))
     
     # ## Envio mensaje a asistente
-    front_blocked = front < FRONT_DANGER or left_front < DIAGONAL_DANGER or right_front < DIAGONAL_DANGER
-    side_too_close = left < SIDE_WARN or right < SIDE_WARN
-    corridor_hold_valid = (
-        front > CORRIDOR_FORCE_FRONT_MIN
-        and min(left, right) >= SIDE_CRITICAL
-        and min(left_front, right_front) >= CORRIDOR_HOLD_DIAGONAL_MIN
-    )
+    front_blocked = compute_front_blocked(left_front, front, right_front)
+    side_too_close = compute_side_too_close(left, right)
+    corridor_hold_valid = compute_corridor_hold_valid(left, left_front, front, right_front, right)
     decision_moment = step_count % DECISION_INTERVAL == 0
 
     # Reaccion local rapida: no espera a Groq si el robot queda mirando una pared.
@@ -405,33 +443,8 @@ front_right_wheel.setVelocity(0)
 back_right_wheel.setVelocity(0)
 
 
-## Mapa de calor
-pos_x = np.array(pos_x)
-pos_y = np.array(pos_y)
-
-heat_map = binned_statistic_2d(
-    pos_x,
-    pos_y,
-    np.zeros(pos_x.shape),
-    statistic='count',
-    bins=20,
-    range=[[-5, 5], [-5, 5]]
-)
-
-plt.figure()
-plt.imshow(
-    np.transpose(heat_map.statistic),
-    origin='lower'
-)
-
-plt.colorbar()
-plt.title("Mapa de calor del recorrido del robot")
-plt.xlabel("X")
-plt.ylabel("Y")
-plt.tight_layout()
-
 heatmap_path = os.path.abspath("heatmap_recorrido_13.png")
-plt.savefig(heatmap_path, dpi=150)
+collector.save(heatmap_path)
 print("Mapa de calor guardado en: {}".format(heatmap_path))
 
 try:
@@ -440,4 +453,4 @@ try:
 except Exception as error:
     print("No se pudo abrir automaticamente el mapa: {}".format(error))
 
-plt.show(block=True)
+collector.show()
