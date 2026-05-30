@@ -16,58 +16,59 @@ class LLMDecider:
             return None
     
         left, left_front, front, right_front, right = [float(v) for v in sensor_state[:5]]
-        left_score = 0.40 * left + 0.60 * left_front
-        right_score = 0.40 * right + 0.60 * right_front
-        lateral_clearance = min(left, right)
-        front_clearance = min(left_front, front, right_front)
-        corridor_score = min(left, right) - abs(left - right)
-        open_space_score = min(sensor_state)
+        open_space = min(left, left_front, front, right_front, right) > 1.35
+        corridor_candidate = (
+            front >= 0.40
+            and left_front > 0.30
+            and right_front > 0.30
+            and 0.30 < left < 1.60
+            and 0.30 < right < 1.60
+            and abs(left - right) < 0.95
+            and abs(left_front - right_front) < 1.10
+        )
+        critical_obstacle = (
+            front < 0.40
+            or left <= 0.30
+            or right <= 0.30
+            or left_front <= 0.30
+            or right_front <= 0.30
+        )
     
         current_state = 0
         steps_in_state = 0
         is_stuck = False
-        vel_left = 0.0
-        vel_right = 0.0
-    
+
         if robot_state:
             current_state  = int(robot_state.get("state", 0))
             steps_in_state = int(robot_state.get("steps_in_state", 0))
             is_stuck       = bool(robot_state.get("is_stuck", False))
-            vel_left       = float(robot_state.get("vel_left", 0.0))
-            vel_right      = float(robot_state.get("vel_right", 0.0))
     
         system_prompt = (
             "You are a robot navigation supervisor.\n"
             "Return exactly one token: STATE_0, STATE_1, or STATE_2.\n"
             "Sensor order: Left, FrontLeft, Front, FrontRight, Right. Range 0.0 to 2.0 (0=wall, 2=free space).\n\n"
             "Available behaviours:\n"
-            "STATE_0 = Braitenberg obstacle avoidance. "
-            "Reactive behaviour: steers away from nearby obstacles using sensor difference. "
-            "Use when front or sides are dangerously close.\n"
-            "STATE_1 = Narrow corridor navigation. "
-            "Keeps the robot centered between two lateral walls while moving forward steadily. "
-            "Use when both sides are detected and the front is still open.\n"
-            "STATE_2 = Systematic exploration sweep. "
-            "Robot alternates turn direction every fixed number of steps to cover new map areas. "
-            "Use only when all sensors read above 1.35 and the space is fully open.\n\n"
-            "Decision rules:\n"
-            "- STATE_1: Front > 0.95, 0.40 < Left < 1.60, 0.40 < Right < 1.60, abs(Left-Right) < 0.95.\n"
-            "- STATE_2: all sensors > 1.35. Robot is in fully open space with no nearby walls.\n"
-            "- STATE_0: any other situation, especially when front is blocked or any side is critical.\n"
-            "- Never choose STATE_2 if any sensor is below 1.35.\n"
-            "- Never choose STATE_1 if Front < 0.45 or either side is below 0.40.\n"
-            "- If the robot is stuck, always prefer STATE_0.\n"
+            "STATE_0 = Braitenberg obstacle avoidance for blocked or risky situations.\n"
+            "STATE_1 = Narrow corridor navigation, centered between two lateral walls.\n"
+            "STATE_2 = Exploration in fully open space.\n\n"
+            "Use the derived flags as authoritative. Do not reinterpret close side walls as danger when corridor_candidate=True.\n"
+            "Priority rules:\n"
+            "1. If is_stuck=True or critical_obstacle=True, return STATE_0.\n"
+            "2. Else if open_space=True, return STATE_2.\n"
+            "3. Else if corridor_candidate=True, return STATE_1.\n"
+            "4. Else return STATE_0.\n"
+            "Examples:\n"
+            "- Sensors Left=0.35, FrontLeft=0.35, Front=0.64, FrontRight=0.81, Right=0.67 => STATE_1.\n"
+            "- Sensors Left=0.75, FrontLeft=1.08, Front=0.44, FrontRight=0.34, Right=0.35 => STATE_1.\n"
             "Do not explain your choice."
         )
     
         user_prompt = (
             f"Current state={current_state}; steps_in_state={steps_in_state}; is_stuck={is_stuck}\n"
-            f"Wheel velocities (normalized -1 to 1): left={vel_left:.2f}, right={vel_right:.2f}\n"
             f"Sensors: Left={left:.2f}; FrontLeft={left_front:.2f}; Front={front:.2f}; "
             f"FrontRight={right_front:.2f}; Right={right:.2f}\n"
-            f"Computed scores: left_score={left_score:.3f}, right_score={right_score:.3f}, "
-            f"front_clearance={front_clearance:.3f}, lateral_clearance={lateral_clearance:.3f}, "
-            f"corridor_score={corridor_score:.3f}, open_space_score={open_space_score:.3f}\n"
+            f"Derived flags: open_space={open_space}; corridor_candidate={corridor_candidate}; "
+            f"critical_obstacle={critical_obstacle}\n"
             "Output one token only: STATE_0, STATE_1, or STATE_2."
         )
     
