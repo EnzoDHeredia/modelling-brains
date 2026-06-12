@@ -23,8 +23,8 @@ DECISION_INTERVAL = 40
 RECOVERY_STEPS = 5
 
 # Umbrales de distancia. Las lecturas vienen del LiDAR: valores bajos implican pared/obstaculo.
-FRONT_DANGER = 0.90
-FRONT_CRITICAL = 0.45
+FRONT_DANGER = 1.30
+FRONT_CRITICAL = 0.75
 FRONT_CLEAR = 1.35
 TURN_DEADBAND = 0.18
 
@@ -43,7 +43,7 @@ EXPLORATION_RANDOM_TURN_MAX = 0.12
 EXPLORATION_TURN_STEPS = 120
 
 # Umbrales laterales y diagonales usados para decidir si hay riesgo inmediato.
-DIAGONAL_DANGER = 0.70
+DIAGONAL_DANGER = 0.90
 SIDE_WARN = 0.85
 SIDE_DANGER = 0.35
 SIDE_CRITICAL = 0.40
@@ -157,7 +157,7 @@ def is_corridor_candidate(left, left_front, front, right_front, right):
     side_pair = (
         CORRIDOR_MIN_SIDE < left < 1.60
         and CORRIDOR_MIN_SIDE < right < 1.60
-        and abs(left - right) < 0.95
+        and abs(left - right) < 1.30
     )
     # Las diagonales ayudan a descartar esquinas o choques inminentes.
     diagonal_pair = (
@@ -299,10 +299,10 @@ while robot.step(TIME_STEP) != -1 and step_count < MAX_STEPS:
             front_diagonal_clear = min(left_front, right_front) > 1.10
             lateral_only = front > FRONT_CLEAR and front_diagonal_clear
 
-            max_turn = 0.01 if lateral_only else SIDE_AVOID_TURN_BASE + SIDE_AVOID_TURN_GAIN * (1.0 - front_priority)
+            max_turn = 0.04 if lateral_only else SIDE_AVOID_TURN_BASE + SIDE_AVOID_TURN_GAIN * (1.0 - front_priority)
             turn_error = deadband((right_clearance - left_clearance) / max_range, TURN_DEADBAND)
             turn = np.clip(turn_error, -max_turn, max_turn)
-            forward = 0.78 if lateral_only else 0.62 + 0.16 * front_priority
+            forward = 0.65 if lateral_only else 0.62 + 0.16 * front_priority
             vel_left = forward + turn
             vel_right = forward - turn
         else:

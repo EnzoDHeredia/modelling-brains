@@ -29,7 +29,7 @@ class LLMDecider:
             and right_front > 0.30
             and 0.30 < left < 1.60
             and 0.30 < right < 1.60
-            and abs(left - right) < 0.95
+            and abs(left - right) < 1.30
             and abs(left_front - right_front) < 1.10
         )
         critical_obstacle = (
